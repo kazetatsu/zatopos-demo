@@ -7,8 +7,7 @@ import numpy as np
 import zatopos
 
 
-def receive_task(n:int, ear_driver:zatopos.EarDriver, sounds:np.ndarray):
-    # print("ear_driver on", n, "th t_receive:", ear_driver.c_driver)
+def receive_task(ear_driver:zatopos.EarDriver, sounds:np.ndarray):
     ear_driver.receive(sounds)
     return
 
@@ -20,7 +19,11 @@ def search_task(musical:zatopos.Musical, signal_spaces:np.ndarray, result:np.nda
     return
 
 
-def calc_task(busno:int, devaddr:int, e_finish:threading.Event, result:np.ndarray, l_result:threading.Lock):
+def calc_task(
+    busno:int, devaddr:int,
+    e_finish:threading.Event,
+    snratio:np.ndarray, l_snratio:threading.Lock, result:np.ndarray, l_result:threading.Lock
+):
     # Reusing variables
     ear_driver = zatopos.EarDriver(busno, devaddr)
     # print("ear_driver on t_calc: ", ear_driver.c_driver)
@@ -34,24 +37,32 @@ def calc_task(busno:int, devaddr:int, e_finish:threading.Event, result:np.ndarra
     # Init 2
     t_receive = threading.Thread(target=receive_task, args=(2, ear_driver, sounds_u))
     t_receive.start()
-    signal_spaces = zatopos.get_signal_spaces(sounds_f)
+
+    eigval, signal_spaces = zatopos.fft_eig(sounds_f)
+    signal_spaces /= np.sqrt(signal_spaces * signal_spaces.conjugate(), dtype=np.complex64)
+    l_snratio.acquire()
+    snratio[:] = eigval[:,0] / eigval.sum(axis=1)
+    l_snratio.release()
+
     t_receive.join()
     sounds_f = sounds_u.transpose(0,2,1).astype(np.float32)
 
     # Main loop
-    n = 3
     while True:
-        t_receive = threading.Thread(target=receive_task, args=(n, ear_driver, sounds_u))
+        t_receive = threading.Thread(target=receive_task, args=(ear_driver, sounds_u))
         t_search  = threading.Thread(target=search_task, args=(musical, signal_spaces, result, l_result))
 
         t_receive.start()
         t_search.start()
 
-        signal_spaces = zatopos.get_signal_spaces(sounds_f)
+        eigval, signal_spaces = zatopos.fft_eig(sounds_f)
+        signal_spaces /= np.sqrt(signal_spaces * signal_spaces.conjugate(), dtype=np.complex64)
+        l_snratio.acquire()
+        snratio[:] = eigval[:,0] / eigval.sum(axis=1)
+        l_snratio.release()
 
         t_receive.join()
         sounds_f = sounds_u.transpose(0,2,1).astype(np.float32)
-        n += 1
         t_search.join()
 
         if e_finish.is_set():
@@ -63,25 +74,55 @@ def calc_task(busno:int, devaddr:int, e_finish:threading.Event, result:np.ndarra
 
 def main_task(busno:int, devaddr:int):
     e_finish = threading.Event()
-    result = np.ndarray((8,8), dtype=np.float32)
+    n = int(zatopos.EAR_WINDOW_LEN/2-1)
+    snratio = np.ndarray((n,), dtype=np.float32)
+    l_snratio = threading.Lock()
+    result = np.ndarray((n,8,8), dtype=np.float32)
     l_result = threading.Lock()
 
-    t_calc = threading.Thread(target=calc_task, args=(busno, devaddr, e_finish, result, l_result))
+    t_calc = threading.Thread(
+        target=calc_task,
+        args=(
+            busno, devaddr,
+            e_finish,
+            snratio, l_snratio, result, l_result
+        )
+    )
 
     t_calc.start()
 
     fig = plt.figure()
+    ax_sn = fig.add_subplot(2,1,1)
+    ax_res = fig.add_subplot(2,1,2)
 
-    def update_func(frame, result:np.ndarray, l_result:threading.Lock):
-        plt.cla()
+    def update_func(
+        frame,
+        ax_sn:plt.Axes, snratio:np.ndarray, l_snratio:threading.Lock,
+        ax_res:plt.Axes, result:np.ndarray, l_result:threading.Lock
+    ):
+        # Show S/N ratio
+        n = int(zatopos.EAR_WINDOW_LEN/2-1)
+        x = np.arange(n)
+        ax_sn.cla()
+        ax_sn.set_xlim(xmin=0, xmax=n)
+        ax_sn.set_ylim(ymin=0.0, ymax=1.0)
+        l_snratio.acquire()
+        ax_sn.plot(x, snratio)
+        i_max_sn = np.argmax(snratio)
+        max_sn = snratio[i_max_sn]
+        l_snratio.release()
+        ax_sn.scatter(i_max_sn, max_sn)
+
+        # Show result
+        ax_res.cla()
         l_result.acquire()
-        plt.imshow(result)
+        ax_res.imshow(result[i_max_sn])
         l_result.release()
 
     fanim = anim.FuncAnimation(
         fig=fig,
         func=update_func,
-        fargs=(result, l_result),
+        fargs=(ax_sn, snratio, l_snratio, ax_res, result, l_result),
         interval=200,
         frames=range(32),
         repeat=True

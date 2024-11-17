@@ -31,11 +31,11 @@ def calc_task(
     sounds_u = np.ndarray((5, zatopos.EAR_WINDOW_LEN, zatopos.EAR_NUM_MICS), dtype=np.uint16) # BUG: shape[0] を奇数にするとタイムアウト起こす
 
     # Init 1
-    receive_task(1, ear_driver, sounds_u)
+    receive_task(ear_driver, sounds_u)
     sounds_f = sounds_u.transpose(0,2,1).astype(np.float32)
 
     # Init 2
-    t_receive = threading.Thread(target=receive_task, args=(2, ear_driver, sounds_u))
+    t_receive = threading.Thread(target=receive_task, args=(ear_driver, sounds_u))
     t_receive.start()
 
     eigval, signal_spaces = zatopos.fft_eig(sounds_f)
